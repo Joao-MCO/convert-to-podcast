@@ -134,11 +134,27 @@ def pull_local_prompt(ref: str) -> ChatPromptTemplate:
 podcastfy.content_generator.hub.pull = pull_local_prompt
 
 
+
 def build_config():
     # O podcastfy busca `<TTS>_API_KEY` no config; o Kokoro é local e não usa chave.
     config = load_config()
     config.KOKORO_API_KEY = ""
     return config
+
+
+def api_key_label_for(llm_model: str) -> str:
+    """Variável de ambiente com a chave do provedor LiteLLM (ex.: groq/... -> GROQ_API_KEY).
+
+    O podcastfy exige que ela exista; o Ollama local não usa chave.
+    """
+    provider = llm_model.split("/", 1)[0]
+    if provider.startswith("ollama"):
+        os.environ.setdefault("OLLAMA_API_KEY", "ollama")
+        return "OLLAMA_API_KEY"
+    label = f"{provider.upper()}_API_KEY"
+    if not os.environ.get(label):
+        raise SystemExit(f"Defina {label} no .env para usar o modelo {llm_model!r}.")
+    return label
 
 
 def convert(
@@ -156,8 +172,8 @@ def convert(
         else:
             urls.append(item)  # URLs, PDFs e vídeos do YouTube o podcastfy extrai sozinho.
 
-    # O LiteLLM exige uma variável de chave mesmo para o Ollama local.
-    os.environ.setdefault("OLLAMA_API_KEY", "ollama")
+    config = build_config()  # também carrega o .env
+    api_key_label = api_key_label_for(llm_model)
 
     return generate_podcast(
         urls=urls or None,
@@ -165,10 +181,10 @@ def convert(
         transcript_file=transcript_file,
         transcript_only=transcript_only,
         tts_model="kokoro",
-        config=build_config(),
+        config=config,
         conversation_config=CONVERSATION_CONFIG,
         llm_model_name=llm_model,
-        api_key_label="OLLAMA_API_KEY",
+        api_key_label=api_key_label,
     )
 
 

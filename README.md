@@ -33,6 +33,13 @@ python converter.py https://exemplo.com/artigo        # URL, PDF, YouTube ou .tx
 python converter.py --transcript-only artigo.pdf      # só o roteiro
 python converter.py --transcript data\transcripts\transcript_x.txt  # áudio a partir de um roteiro editado
 python converter.py --llm ollama_chat/qwen3.5:4b nota.txt           # outro modelo do Ollama
+python converter.py --llm groq/openai/gpt-oss-120b artigo.pdf       # roteiro via API da Groq
 ```
+
+### LLM por API
+
+Qualquer provedor do [LiteLLM](https://docs.litellm.ai/docs/providers) funciona com `--llm <provedor>/<modelo>`. A chave vem da variável `<PROVEDOR>_API_KEY`, definida no ambiente ou num arquivo `.env` (ex.: `GROQ_API_KEY=...`).
+
+No plano gratuito da Groq, use `groq/openai/gpt-oss-120b`. O `qwen/qwen3.8-27b` limita a saída a 1.000 tokens por minuto, menos do que o podcastfy pede por chamada.
 
 Roteiros são salvos em `data/transcripts/` e áudios em `data/audio/`. Na primeira execução o Kokoro baixa o modelo (~330 MB) do HuggingFace.
