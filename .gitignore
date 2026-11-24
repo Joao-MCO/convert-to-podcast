@@ -1,3 +1,14 @@
+# Ambiente virtual e caches do Python
 .venv/
 __pycache__/
+*.py[cod]
+
+# Segredos locais
+.env
+
+# Saídas geradas (roteiros e áudios)
 data/
+
+# Estado de ferramentas de IA
+.omc/
+.claude/settings.local.json
