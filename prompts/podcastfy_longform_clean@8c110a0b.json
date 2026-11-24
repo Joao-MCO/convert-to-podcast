@@ -1,0 +1,76 @@
+{
+  "lc": 1,
+  "type": "constructor",
+  "id": [
+    "langchain",
+    "prompts",
+    "chat",
+    "ChatPromptTemplate"
+  ],
+  "kwargs": {
+    "input_variables": [
+      "transcript"
+    ],
+    "messages": [
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain",
+          "prompts",
+          "chat",
+          "SystemMessagePromptTemplate"
+        ],
+        "kwargs": {
+          "prompt": {
+            "lc": 1,
+            "type": "constructor",
+            "id": [
+              "langchain",
+              "prompts",
+              "prompt",
+              "PromptTemplate"
+            ],
+            "kwargs": {
+              "input_variables": [],
+              "template": "You are a transcript cleaner. Your task is to:\n 1. Your have two jobs. Job1: Remove any tags that contain scratchpad blocks from input transcript. Job2: Make sure transcript only contains tags enclosed by <Person1> or <Person2> tags, which should all be closed.\n 2. Preserve all other content exactly as is\n 3. Return only the cleaned text without any explanations\n Example input1:\n <Person1>Excellent question!\n ```scratchpad\n [Conversation Focus: Practical applications of the research and concluding the podcast.]\n [Key Points for Discussion]\n ```\n </Person1><Person1>Excellent question! So, imagine having a crystal ball, not for specific stock prices, but for the entire market's interconnectedness. That's what this research offers, enabling more informed decisions by taking the overall architecture into account.\n </Person1><Person2>That sounds incredibly powerful! Could you elaborate on specific examples?\n </Person2>\n Example output1:\n <Person1>Excellent question! So, imagine having a crystal ball, not for specific stock prices, but for the entire market's interconnectedness. That's what this research offers, enabling more informed decisions by taking the overall architecture into account.\n </Person1><Person2>That sounds incredibly powerful! Could you elaborate on specific examples?\n </Person2>\n Example input2:\n <Person1>Welcome to Podcast Name! </Person1>\n ```scratchpad\n [Focus: Practical podcast.]\n [Content Breakdown:] * Acknowledgements\n ```\n <Person2>That sounds incredibly powerful! Could you elaborate on specific examples?\n </Person2>\n Example output2:\n <Person1>Welcome to Podcast Name! </Person1>\n <Person2>That sounds incredibly powerful! Could you elaborate on specific examples?\n </Person2>",
+              "template_format": "f-string"
+            },
+            "name": "PromptTemplate"
+          }
+        }
+      },
+      {
+        "lc": 1,
+        "type": "constructor",
+        "id": [
+          "langchain",
+          "prompts",
+          "chat",
+          "HumanMessagePromptTemplate"
+        ],
+        "kwargs": {
+          "prompt": {
+            "lc": 1,
+            "type": "constructor",
+            "id": [
+              "langchain",
+              "prompts",
+              "prompt",
+              "PromptTemplate"
+            ],
+            "kwargs": {
+              "input_variables": [
+                "transcript"
+              ],
+              "template": "{transcript}",
+              "template_format": "f-string"
+            },
+            "name": "PromptTemplate"
+          }
+        }
+      }
+    ]
+  },
+  "name": "ChatPromptTemplate"
+}
