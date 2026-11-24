@@ -33,6 +33,7 @@ from pydub import AudioSegment
 
 import podcastfy.content_generator
 from podcastfy.client import generate_podcast
+from podcastfy.content_parser.website_extractor import WebsiteExtractor
 from podcastfy.tts.base import TTSProvider
 from podcastfy.tts.factory import TTSProviderFactory
 from podcastfy.utils.config import load_config
@@ -132,6 +133,33 @@ def pull_local_prompt(ref: str) -> ChatPromptTemplate:
 
 
 podcastfy.content_generator.hub.pull = pull_local_prompt
+
+
+def fetch_rendered_html(self: WebsiteExtractor, url: str) -> str:
+    """Substitui `WebsiteExtractor.fetch_with_playwright` do podcastfy.
+
+    O original espera `networkidle` por 10 s, o que nunca acontece em sites com
+    anúncios e rastreadores (ex.: ge.globo.com). Aqui basta o HTML carregar; a
+    ociosidade da rede é só uma espera curta e opcional para conteúdo via JS.
+    """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(user_agent=self.user_agent, ignore_https_errors=True)
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=5_000)
+            except PlaywrightTimeout:
+                pass
+            return page.content()
+        finally:
+            browser.close()
+
+
+WebsiteExtractor.fetch_with_playwright = fetch_rendered_html
 
 
 
