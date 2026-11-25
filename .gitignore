@@ -9,6 +9,9 @@ __pycache__/
 # Saídas geradas (roteiros e áudios)
 data/
 
+# Gravações pessoais usadas para clonar as vozes
+voices/
+
 # Estado de ferramentas de IA
 .omc/
 .claude/settings.local.json

@@ -45,8 +45,8 @@ AUDIOS_TO_KEEP = 5
 DEFAULT_LLM = "ollama_chat/qwen3:8b"
 
 # As vozes prontas do Qwen3-TTS têm sotaque estrangeiro em português. Por isso
-# clonamos (modelo Base) as vozes brasileiras de ./voices, criadas uma única vez
-# com o modelo VoiceDesign a partir de uma descrição (ver voices/vozes.json).
+# clonamos (modelo Base) gravações de vozes brasileiras: ./voices/<voz>.wav, com a
+# transcrição exata de cada uma em ./voices/vozes.json.
 QWEN_TTS_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 VOICES_DIR = Path(__file__).parent / "voices"
 
@@ -66,7 +66,7 @@ CONVERSATION_CONFIG = {
         "ending_message": "Até a próxima!",
         "output_directories": {"audio": str(AUDIO_DIR)},
         "qwen": {
-            "default_voices": {"question": "apresentador", "answer": "convidada"},
+            "default_voices": {"question": "apresentador", "answer": "convidado"},
             "model": QWEN_TTS_REPO,
         },
     },

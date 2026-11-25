@@ -3,7 +3,7 @@
 Converte links e arquivos em um podcast de dois locutores em português, usando só software e modelos abertos:
 
 - **Roteiro:** [podcastfy](https://github.com/souzatharsis/podcastfy) + LLM via [LiteLLM](https://docs.litellm.ai/docs/providers): [Ollama](https://ollama.com) local (padrão: `qwen3:8b`) ou uma API como a Groq.
-- **Voz:** [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (Apache-2.0). As vozes prontas dele têm sotaque estrangeiro, então o converter clona (modelo Base) duas vozes brasileiras salvas em `voices/`, criadas a partir de uma descrição com o modelo VoiceDesign.
+- **Voz:** [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (Apache-2.0), clonando (modelo Base) gravações de vozes brasileiras. As vozes prontas dele têm sotaque estrangeiro.
 - **Arquivos:** [markitdown](https://github.com/microsoft/markitdown) (PDF, Word, PowerPoint, Excel, HTML, EPUB, texto...).
 - **Áudio:** ffmpeg.
 
@@ -26,6 +26,13 @@ ollama pull qwen3:8b
 ```powershell
 pip install --force-reinstall --no-deps torch torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
+
+### Vozes
+
+As vozes do podcast são clonadas de gravações em `voices/`, que fica fora do git por serem gravações pessoais:
+
+- `voices/apresentador.wav` e `voices/convidado.wav`: 10 a 20 s de fala limpa em português do Brasil, de quem autorizou o uso da própria voz.
+- `voices/vozes.json`: a transcrição exata de cada gravação, ex.: `{"apresentador": "Oi, meu nome é...", "convidado": "Aqui quem fala é..."}`.
 
 ## Uso
 
