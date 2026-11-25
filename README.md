@@ -36,6 +36,16 @@ As vozes do podcast são clonadas de gravações em `voices/`, que fica fora do 
 
 ## Uso
 
+### Interface web
+
+```powershell
+python app.py
+```
+
+Abre `http://127.0.0.1:7860` no navegador. Cole links e/ou envie arquivos, escolha quem escreve o roteiro (Groq ou Ollama) e clique em **Gerar podcast**. A barra mostra qual fala está sendo narrada, e os 5 últimos podcasts ficam listados ao lado. A interface só aceita acesso do próprio computador.
+
+### Linha de comando
+
 ```powershell
 python converter.py https://exemplo.com/artigo                  # página ou vídeo do YouTube
 python converter.py relatorio.pdf slides.pptx notas.md          # arquivos (vários de uma vez)

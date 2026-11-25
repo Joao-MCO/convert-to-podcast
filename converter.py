@@ -17,9 +17,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 from copy import deepcopy
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 # O podcastfy lê e grava roteiros com a codificação padrão do sistema (cp1252 no
 # Windows); relança em modo UTF-8, antes dos imports pesados, para aceitar
@@ -87,29 +88,42 @@ def to_mp3(samples: np.ndarray, sample_rate: int) -> bytes:
 
 
 class QwenTTS(TTSProvider):
-    """Provedor TTS local: Qwen3-TTS clonando as vozes brasileiras de ./voices."""
+    """Provedor TTS local: Qwen3-TTS clonando as vozes brasileiras de ./voices.
+
+    O podcastfy cria um provedor novo a cada podcast; o modelo e as vozes ficam
+    em atributos de classe para não serem recarregados (leva minutos) quando
+    vários podcasts são gerados no mesmo processo, como na interface web.
+    """
+
+    _tts = None
+    _tts_lock = threading.Lock()
+    _voice_prompts = {}
+    # Chamado como on_progress(falas_prontas, total_de_falas) durante a narração.
+    on_progress: Optional[Callable[[int, int], None]] = None
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         # O podcastfy lê `self.model`, mas passa nele o nome do provedor ("qwen");
         # o modelo carregado é sempre QWEN_TTS_REPO.
         self.model = model
-        self._tts = None
-        self._voice_prompts = {}
+        self._done = 0
+        self._total = 0
 
     @property
     def tts(self):
-        # Carrega o modelo só quando o áudio for gerado de fato.
-        if self._tts is None:
-            import torch
-            from qwen_tts import Qwen3TTSModel
+        # Carrega o modelo só quando for usado; a trava evita carregar duas vezes
+        # quando a interface pré-carrega em segundo plano.
+        with QwenTTS._tts_lock:
+            if QwenTTS._tts is None:
+                import torch
+                from qwen_tts import Qwen3TTSModel
 
-            cuda = torch.cuda.is_available()
-            self._tts = Qwen3TTSModel.from_pretrained(
-                QWEN_TTS_REPO,
-                device_map="cuda:0" if cuda else "cpu",
-                dtype=torch.bfloat16 if cuda else torch.float32,
-            )
-        return self._tts
+                cuda = torch.cuda.is_available()
+                QwenTTS._tts = Qwen3TTSModel.from_pretrained(
+                    QWEN_TTS_REPO,
+                    device_map="cuda:0" if cuda else "cpu",
+                    dtype=torch.bfloat16 if cuda else torch.float32,
+                )
+        return QwenTTS._tts
 
     def get_supported_tags(self) -> List[str]:
         return []  # O Qwen3-TTS não interpreta SSML: todas as tags são removidas.
@@ -118,23 +132,31 @@ class QwenTTS(TTSProvider):
         # O podcastfy só pareia falas alternadas; LLMs às vezes repetem o mesmo
         # locutor, e as tags iriam parar no texto falado. Junta essas falas.
         merged = re.sub(r"</(Person[12])>\s*<\1>", " ", input_text)
-        return super().split_qa(merged, ending_message, supported_tags)
+        pairs = super().split_qa(merged, ending_message, supported_tags)
+        self._done, self._total = 0, 2 * len(pairs)
+        return pairs
 
     def generate_audio(self, text: str, voice: str, model: str, voice2: str = None) -> bytes:
         self.validate_parameters(text, voice, model)
         wavs, sample_rate = self.tts.generate_voice_clone(
             text=text, language="Portuguese", voice_clone_prompt=self.voice_prompt(voice)
         )
+        self._done += 1
+        if QwenTTS.on_progress:
+            QwenTTS.on_progress(self._done, max(self._total, self._done))
         return to_mp3(wavs[0], sample_rate)
 
     def voice_prompt(self, voice: str):
-        # Extrai uma vez por execução as características de cada voz de referência.
-        if voice not in self._voice_prompts:
+        # Extrai uma vez as características de cada voz de referência; refaz se a
+        # gravação for trocada.
+        wav = VOICES_DIR / f"{voice}.wav"
+        key = (voice, wav.stat().st_mtime)
+        if key not in QwenTTS._voice_prompts:
             transcripts = json.loads((VOICES_DIR / "vozes.json").read_text(encoding="utf-8"))
-            self._voice_prompts[voice] = self.tts.create_voice_clone_prompt(
-                ref_audio=str(VOICES_DIR / f"{voice}.wav"), ref_text=transcripts[voice]
+            QwenTTS._voice_prompts[key] = self.tts.create_voice_clone_prompt(
+                ref_audio=str(wav), ref_text=transcripts[voice]
             )
-        return self._voice_prompts[voice]
+        return QwenTTS._voice_prompts[key]
 
 
 TTSProviderFactory.register_provider("qwen", QwenTTS)
@@ -185,6 +207,10 @@ def fetch_rendered_html(self: WebsiteExtractor, url: str) -> str:
 WebsiteExtractor.fetch_with_playwright = fetch_rendered_html
 
 
+class ConversionError(Exception):
+    """Erro esperado na conversão, com mensagem pronta para o usuário."""
+
+
 def build_config():
     # O podcastfy busca `<TTS>_API_KEY` no config; o Qwen3-TTS é local e não usa chave.
     config = load_config()  # também carrega o .env
@@ -203,7 +229,7 @@ def api_key_label_for(llm_model: str) -> str:
         return "OLLAMA_API_KEY"
     label = f"{provider.upper()}_API_KEY"
     if not os.environ.get(label):
-        raise SystemExit(f"Defina {label} no .env para usar o modelo {llm_model!r}.")
+        raise ConversionError(f"Defina {label} no .env para usar o modelo {llm_model!r}.")
     return label
 
 
@@ -213,7 +239,7 @@ def read_file(path: Path) -> str:
 
     text = MarkItDown().convert(str(path)).text_content.strip()
     if not text:
-        raise SystemExit(f"Nenhum texto encontrado em {path}.")
+        raise ConversionError(f"Nenhum texto encontrado em {path.name}.")
     return text
 
 
@@ -251,7 +277,7 @@ def convert(inputs: List[str], llm_model: str = DEFAULT_LLM) -> str:
         )
 
     if not audio:
-        raise SystemExit("Falha ao gerar o podcast; veja o log acima.")
+        raise ConversionError("Falha ao gerar o podcast; veja o log no terminal.")
     prune_audios()
     return audio
 
@@ -261,7 +287,10 @@ def main() -> None:
     parser.add_argument("inputs", nargs="+", help="URLs, vídeos do YouTube ou arquivos (PDF, DOCX, PPTX, TXT...)")
     parser.add_argument("--llm", default=DEFAULT_LLM, help=f"modelo LiteLLM (padrão: {DEFAULT_LLM})")
     args = parser.parse_args()
-    print(convert(args.inputs, args.llm))
+    try:
+        print(convert(args.inputs, args.llm))
+    except ConversionError as error:
+        sys.exit(str(error))
 
 
 if __name__ == "__main__":
