@@ -1,13 +1,12 @@
-"""Converte URLs, PDFs ou textos em podcast usando apenas software aberto.
+"""Converte links e arquivos em podcast usando apenas software aberto.
 
-- Roteiro: podcastfy + LLM local via Ollama (LiteLLM).
-- Voz: Kokoro-82M (Apache-2.0), registrado como provedor TTS do podcastfy.
-- Áudio: pydub + ffmpeg.
+- Roteiro: podcastfy + LLM via LiteLLM (Ollama local ou API, ex.: Groq).
+- Voz: Qwen3-TTS (Apache-2.0), registrado como provedor TTS do podcastfy.
+- Arquivos: markitdown (PDF, Word, PowerPoint, Excel, HTML, EPUB, texto...).
 
 Uso:
     python converter.py https://exemplo.com/artigo
-    python converter.py documento.pdf notas.txt
-    python converter.py --transcript data/transcripts/transcript_x.txt
+    python converter.py relatorio.pdf apresentacao.pptx notas.md
 """
 
 import argparse
@@ -17,6 +16,8 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+from copy import deepcopy
 from pathlib import Path
 from typing import List, Optional
 
@@ -39,83 +40,90 @@ from podcastfy.tts.factory import TTSProviderFactory
 from podcastfy.utils.config import load_config
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
-KOKORO_REPO ="hexgrad/Kokoro-82M"
-KOKORO_SAMPLE_RATE = 24000
+AUDIO_DIR = Path("data/audio")
+AUDIOS_TO_KEEP = 5
 DEFAULT_LLM = "ollama_chat/qwen3:8b"
+
+QWEN_TTS_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+QWEN_TTS_STYLE = "Fale em português do Brasil, de forma natural e descontraída, como num podcast."
 
 CONVERSATION_CONFIG = {
     "output_language": "Brazilian Portuguese",
-    "podcast_name": "Convert to Podcast",
-    "podcast_tagline": "Seu podcast gerado por IA aberta",
     "conversation_style": ["envolvente", "didático", "descontraído"],
     "roles_person1": "apresentador que resume o conteúdo",
     "roles_person2": "convidado que faz perguntas e esclarece pontos",
-    "user_instructions": "Escreva todo o diálogo em português do Brasil.",
+    "user_instructions": (
+        "Escreva todo o diálogo em português do Brasil, em linguagem falada e natural. "
+        "Não use palavras em inglês, siglas soltas, emojis nem marcações."
+    ),
     "text_to_speech": {
-        "default_tts_model": "kokoro",
+        "default_tts_model": "qwen",
         "audio_format": "mp3",
         "ending_message": "Até a próxima!",
-        "output_directories": {
-            "transcripts": "./data/transcripts",
-            "audio": "./data/audio",
-        },
-        # Vozes pt-BR do Kokoro: pf_dora (feminina), pm_alex e pm_santa (masculinas).
-        "kokoro": {
-            "default_voices": {"question": "pm_alex", "answer": "pf_dora"},
-            "model": "kokoro",
+        "output_directories": {"audio": str(AUDIO_DIR)},
+        "qwen": {
+            "default_voices": {"question": "ryan", "answer": "serena"},
+            "model": QWEN_TTS_REPO,
         },
     },
 }
 
 
-class KokoroTTS(TTSProvider):
-    """Provedor TTS local baseado no Kokoro-82M."""
+def to_mp3(samples: np.ndarray, sample_rate: int) -> bytes:
+    samples = np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0)
+    segment = AudioSegment(
+        (samples * 32767).astype(np.int16).tobytes(),
+        frame_rate=sample_rate,
+        sample_width=2,
+        channels=1,
+    )
+    buffer = io.BytesIO()
+    segment.export(buffer, format="mp3", bitrate="192k")
+    return buffer.getvalue()
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "kokoro"):
+
+class QwenTTS(TTSProvider):
+    """Provedor TTS local baseado no Qwen3-TTS (vozes prontas + instrução de estilo)."""
+
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
+        # O podcastfy lê `self.model`, mas passa nele o nome do provedor ("qwen");
+        # o modelo carregado é sempre QWEN_TTS_REPO.
         self.model = model
-        self._pipeline = None
+        self._tts = None
 
     @property
-    def pipeline(self):
+    def tts(self):
         # Carrega o modelo só quando o áudio for gerado de fato.
-        if self._pipeline is None:
-            from kokoro import KPipeline
+        if self._tts is None:
+            import torch
+            from qwen_tts import Qwen3TTSModel
 
-            self._pipeline = KPipeline(lang_code="p", repo_id=KOKORO_REPO)
-        return self._pipeline
+            cuda = torch.cuda.is_available()
+            self._tts = Qwen3TTSModel.from_pretrained(
+                QWEN_TTS_REPO,
+                device_map="cuda:0" if cuda else "cpu",
+                dtype=torch.bfloat16 if cuda else torch.float32,
+            )
+        return self._tts
 
     def get_supported_tags(self) -> List[str]:
-        return []  # Kokoro não interpreta SSML: todas as tags são removidas.
+        return []  # O Qwen3-TTS não interpreta SSML: todas as tags são removidas.
 
     def split_qa(self, input_text: str, ending_message: str, supported_tags: List[str] = None):
-        # O podcastfy só pareia falas alternadas; LLMs locais às vezes repetem o
-        # mesmo locutor, e as tags iriam parar no texto falado. Junta essas falas.
+        # O podcastfy só pareia falas alternadas; LLMs às vezes repetem o mesmo
+        # locutor, e as tags iriam parar no texto falado. Junta essas falas.
         merged = re.sub(r"</(Person[12])>\s*<\1>", " ", input_text)
         return super().split_qa(merged, ending_message, supported_tags)
 
     def generate_audio(self, text: str, voice: str, model: str, voice2: str = None) -> bytes:
         self.validate_parameters(text, voice, model)
-        chunks = [
-            audio.cpu().numpy() if hasattr(audio, "cpu") else np.asarray(audio)
-            for _, _, audio in self.pipeline(text, voice=voice)
-            if audio is not None
-        ]
-        if not chunks:
-            raise RuntimeError(f"Kokoro não gerou áudio para: {text[:80]!r}")
-
-        samples = np.clip(np.concatenate(chunks), -1.0, 1.0)
-        segment = AudioSegment(
-            (samples * 32767).astype(np.int16).tobytes(),
-            frame_rate=KOKORO_SAMPLE_RATE,
-            sample_width=2,
-            channels=1,
+        wavs, sample_rate = self.tts.generate_custom_voice(
+            text=text, speaker=voice, language="Portuguese", instruct=QWEN_TTS_STYLE
         )
-        buffer = io.BytesIO()
-        segment.export(buffer, format="mp3", bitrate="192k")
-        return buffer.getvalue()
+        return to_mp3(wavs[0], sample_rate)
 
 
-TTSProviderFactory.register_provider("kokoro", KokoroTTS)
+TTSProviderFactory.register_provider("qwen", QwenTTS)
 
 
 def pull_local_prompt(ref: str) -> ChatPromptTemplate:
@@ -123,7 +131,8 @@ def pull_local_prompt(ref: str) -> ChatPromptTemplate:
 
     O podcastfy baixa seus prompts do LangChain Hub (serviço fechado) a cada
     execução. As versões fixadas por commit em seu config.yaml foram salvas em
-    ./prompts como `<nome>@<commit>.json`.
+    ./prompts como `<nome>@<commit>.json` (a abertura foi ajustada para não
+    citar nome de podcast).
     """
     path = PROMPTS_DIR / (ref.split("/")[-1].replace(":", "@") + ".json")
     if not path.is_file():
@@ -162,11 +171,10 @@ def fetch_rendered_html(self: WebsiteExtractor, url: str) -> str:
 WebsiteExtractor.fetch_with_playwright = fetch_rendered_html
 
 
-
 def build_config():
-    # O podcastfy busca `<TTS>_API_KEY` no config; o Kokoro é local e não usa chave.
-    config = load_config()
-    config.KOKORO_API_KEY = ""
+    # O podcastfy busca `<TTS>_API_KEY` no config; o Qwen3-TTS é local e não usa chave.
+    config = load_config()  # também carrega o .env
+    config.QWEN_API_KEY = ""
     return config
 
 
@@ -185,50 +193,61 @@ def api_key_label_for(llm_model: str) -> str:
     return label
 
 
-def convert(
-    inputs: List[str],
-    llm_model: str = DEFAULT_LLM,
-    transcript_file: Optional[str] = None,
-    transcript_only: bool = False,
-) -> Optional[str]:
+def read_file(path: Path) -> str:
+    """Extrai o texto de um arquivo local (PDF, Word, PowerPoint, Excel, HTML, texto...)."""
+    from markitdown import MarkItDown
+
+    text = MarkItDown().convert(str(path)).text_content.strip()
+    if not text:
+        raise SystemExit(f"Nenhum texto encontrado em {path}.")
+    return text
+
+
+def prune_audios(keep: int = AUDIOS_TO_KEEP) -> None:
+    audios = sorted(AUDIO_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in audios[keep:]:
+        old.unlink()
+
+
+def convert(inputs: List[str], llm_model: str = DEFAULT_LLM) -> str:
+    """Gera o podcast e devolve o caminho do MP3. O roteiro não é guardado."""
     urls: List[str] = []
     texts: List[str] = []
     for item in inputs:
         path = Path(item)
-        if path.suffix.lower() in {".txt", ".md"} and path.is_file():
-            texts.append(path.read_text(encoding="utf-8"))
+        if path.is_file():
+            texts.append(read_file(path))
         else:
-            urls.append(item)  # URLs, PDFs e vídeos do YouTube o podcastfy extrai sozinho.
+            urls.append(item)  # páginas e vídeos do YouTube o podcastfy extrai sozinho.
 
-    config = build_config()  # também carrega o .env
+    config = build_config()
     api_key_label = api_key_label_for(llm_model)
 
-    return generate_podcast(
-        urls=urls or None,
-        text="\n\n".join(texts) or None,
-        transcript_file=transcript_file,
-        transcript_only=transcript_only,
-        tts_model="kokoro",
-        config=config,
-        conversation_config=CONVERSATION_CONFIG,
-        llm_model_name=llm_model,
-        api_key_label=api_key_label,
-    )
+    with tempfile.TemporaryDirectory() as transcripts_dir:
+        conversation_config = deepcopy(CONVERSATION_CONFIG)
+        conversation_config["text_to_speech"]["output_directories"]["transcripts"] = transcripts_dir
+        audio = generate_podcast(
+            urls=urls or None,
+            text="\n\n".join(texts) or None,
+            tts_model="qwen",
+            config=config,
+            conversation_config=conversation_config,
+            llm_model_name=llm_model,
+            api_key_label=api_key_label,
+        )
+
+    if not audio:
+        raise SystemExit("Falha ao gerar o podcast; veja o log acima.")
+    prune_audios()
+    return audio
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Converte conteúdo em podcast (Ollama + Kokoro).")
-    parser.add_argument("inputs", nargs="*", help="URLs, PDFs ou arquivos .txt/.md")
+    parser = argparse.ArgumentParser(description="Converte links e arquivos em podcast.")
+    parser.add_argument("inputs", nargs="+", help="URLs, vídeos do YouTube ou arquivos (PDF, DOCX, PPTX, TXT...)")
     parser.add_argument("--llm", default=DEFAULT_LLM, help=f"modelo LiteLLM (padrão: {DEFAULT_LLM})")
-    parser.add_argument("--transcript", help="gera o áudio a partir de um roteiro já existente")
-    parser.add_argument("--transcript-only", action="store_true", help="gera só o roteiro, sem áudio")
     args = parser.parse_args()
-
-    if not args.inputs and not args.transcript:
-        parser.error("informe ao menos uma entrada ou --transcript")
-
-    result = convert(args.inputs, args.llm, args.transcript, args.transcript_only)
-    print(result or "Roteiro gerado em ./data/transcripts")
+    print(convert(args.inputs, args.llm))
 
 
 if __name__ == "__main__":

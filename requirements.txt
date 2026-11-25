@@ -1,3 +1,10 @@
-kokoro==0.9.4
 podcastfy==0.4.3
+qwen-tts==0.1.1
+markitdown[pdf,docx,pptx,xlsx]==0.1.9
 playwright
+# Mantêm o conjunto compatível com o podcastfy (numpy<2) e o gradio do qwen-tts (pillow<13).
+numpy<2
+librosa<1
+scipy<1.16
+pillow<13
+pdfplumber<0.11.11
