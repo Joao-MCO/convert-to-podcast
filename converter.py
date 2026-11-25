@@ -44,8 +44,11 @@ AUDIO_DIR = Path("data/audio")
 AUDIOS_TO_KEEP = 5
 DEFAULT_LLM = "ollama_chat/qwen3:8b"
 
-QWEN_TTS_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
-QWEN_TTS_STYLE = "Fale em português do Brasil, de forma natural e descontraída, como num podcast."
+# As vozes prontas do Qwen3-TTS têm sotaque estrangeiro em português. Por isso
+# clonamos (modelo Base) as vozes brasileiras de ./voices, criadas uma única vez
+# com o modelo VoiceDesign a partir de uma descrição (ver voices/vozes.json).
+QWEN_TTS_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+VOICES_DIR = Path(__file__).parent / "voices"
 
 CONVERSATION_CONFIG = {
     "output_language": "Brazilian Portuguese",
@@ -54,7 +57,8 @@ CONVERSATION_CONFIG = {
     "roles_person2": "convidado que faz perguntas e esclarece pontos",
     "user_instructions": (
         "Escreva todo o diálogo em português do Brasil, em linguagem falada e natural. "
-        "Não use palavras em inglês, siglas soltas, emojis nem marcações."
+        "Não use palavras em inglês, emojis nem marcações. Escreva números, placares e datas "
+        "por extenso e troque siglas pelo nome falado (ex.: 'Atlético Mineiro' em vez de 'Atlético-MG')."
     ),
     "text_to_speech": {
         "default_tts_model": "qwen",
@@ -62,7 +66,7 @@ CONVERSATION_CONFIG = {
         "ending_message": "Até a próxima!",
         "output_directories": {"audio": str(AUDIO_DIR)},
         "qwen": {
-            "default_voices": {"question": "ryan", "answer": "serena"},
+            "default_voices": {"question": "apresentador", "answer": "convidada"},
             "model": QWEN_TTS_REPO,
         },
     },
@@ -83,13 +87,14 @@ def to_mp3(samples: np.ndarray, sample_rate: int) -> bytes:
 
 
 class QwenTTS(TTSProvider):
-    """Provedor TTS local baseado no Qwen3-TTS (vozes prontas + instrução de estilo)."""
+    """Provedor TTS local: Qwen3-TTS clonando as vozes brasileiras de ./voices."""
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         # O podcastfy lê `self.model`, mas passa nele o nome do provedor ("qwen");
         # o modelo carregado é sempre QWEN_TTS_REPO.
         self.model = model
         self._tts = None
+        self._voice_prompts = {}
 
     @property
     def tts(self):
@@ -117,10 +122,19 @@ class QwenTTS(TTSProvider):
 
     def generate_audio(self, text: str, voice: str, model: str, voice2: str = None) -> bytes:
         self.validate_parameters(text, voice, model)
-        wavs, sample_rate = self.tts.generate_custom_voice(
-            text=text, speaker=voice, language="Portuguese", instruct=QWEN_TTS_STYLE
+        wavs, sample_rate = self.tts.generate_voice_clone(
+            text=text, language="Portuguese", voice_clone_prompt=self.voice_prompt(voice)
         )
         return to_mp3(wavs[0], sample_rate)
+
+    def voice_prompt(self, voice: str):
+        # Extrai uma vez por execução as características de cada voz de referência.
+        if voice not in self._voice_prompts:
+            transcripts = json.loads((VOICES_DIR / "vozes.json").read_text(encoding="utf-8"))
+            self._voice_prompts[voice] = self.tts.create_voice_clone_prompt(
+                ref_audio=str(VOICES_DIR / f"{voice}.wav"), ref_text=transcripts[voice]
+            )
+        return self._voice_prompts[voice]
 
 
 TTSProviderFactory.register_provider("qwen", QwenTTS)

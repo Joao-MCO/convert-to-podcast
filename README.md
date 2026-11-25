@@ -3,7 +3,7 @@
 Converte links e arquivos em um podcast de dois locutores em português, usando só software e modelos abertos:
 
 - **Roteiro:** [podcastfy](https://github.com/souzatharsis/podcastfy) + LLM via [LiteLLM](https://docs.litellm.ai/docs/providers): [Ollama](https://ollama.com) local (padrão: `qwen3:8b`) ou uma API como a Groq.
-- **Voz:** [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (Apache-2.0), com vozes prontas e instrução de estilo.
+- **Voz:** [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (Apache-2.0). As vozes prontas dele têm sotaque estrangeiro, então o converter clona (modelo Base) duas vozes brasileiras salvas em `voices/`, criadas a partir de uma descrição com o modelo VoiceDesign.
 - **Arquivos:** [markitdown](https://github.com/microsoft/markitdown) (PDF, Word, PowerPoint, Excel, HTML, EPUB, texto...).
 - **Áudio:** ffmpeg.
 
