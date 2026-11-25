@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,34 @@ from typing import Callable, List, Optional
 # qualquer caractere que o LLM gere.
 if __name__ == "__main__" and not sys.flags.utf8_mode:
     sys.exit(subprocess.call([sys.executable, "-X", "utf8", *sys.argv]))
+
+
+def find_ffmpeg() -> bool:
+    """Garante o ffmpeg no PATH deste processo; devolve se ele foi encontrado.
+
+    No Windows, um terminal (ou o VS Code) aberto antes de instalar o ffmpeg não
+    enxerga o PATH novo; nesse caso lê o PATH atual do usuário e do sistema.
+    """
+    if shutil.which("ffmpeg"):
+        return True
+    if os.name == "nt":
+        import winreg
+
+        keys = [
+            (winreg.HKEY_CURRENT_USER, r"Environment"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        ]
+        for root, subkey in keys:
+            try:
+                with winreg.OpenKey(root, subkey) as key:
+                    path, _ = winreg.QueryValueEx(key, "Path")
+            except OSError:
+                continue
+            os.environ["PATH"] += os.pathsep + os.path.expandvars(path)
+    return shutil.which("ffmpeg") is not None
+
+
+find_ffmpeg()  # antes do pydub, que procura o ffmpeg ao ser importado
 
 import numpy as np
 from langchain_core.load import load as load_langchain
@@ -365,6 +394,8 @@ def convert(
     `host` e `guest` são vozes cadastradas (padrão: as duas primeiras). O roteiro
     não é guardado; só os últimos AUDIOS_TO_KEEP MP3s ficam em data/audio.
     """
+    if not find_ffmpeg():
+        raise ConversionError("ffmpeg não encontrado. Instale com: winget install Gyan.FFmpeg")
     voices = list(load_voices())
     if len(voices) < 2:
         raise ConversionError("Cadastre pelo menos duas vozes (apresentador e convidado).")
