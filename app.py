@@ -155,7 +155,11 @@ with gr.Blocks(title="Gerador de Podcasts") as demo:
             ]
 
     button.click(
-        generate, [topic, links, files, llm, host, guest], [result, sources, *history], concurrency_limit=1
+        generate,
+        [topic, links, files, llm, host, guest],
+        [result, sources, *history],
+        concurrency_limit=1,
+        show_progress_on=[result],  # senão a barra aparece em cada player do histórico
     )
     voice_button.click(
         save_voice, [voice_name, voice_audio, voice_text, voice_consent], [voice_status, host, guest]
