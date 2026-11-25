@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -44,18 +45,23 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 AUDIO_DIR = Path("data/audio")
 AUDIOS_TO_KEEP = 5
 DEFAULT_LLM = "ollama_chat/qwen3:8b"
+RESEARCH_PAGES = 4
+RESEARCH_PAGE_CHARS = 3500
 
 # As vozes prontas do Qwen3-TTS têm sotaque estrangeiro em português. Por isso
-# clonamos (modelo Base) gravações de vozes brasileiras: ./voices/<voz>.wav, com a
-# transcrição exata de cada uma em ./voices/vozes.json.
+# clonamos (modelo Base) gravações de vozes brasileiras: ./voices/<Nome>.wav, com a
+# transcrição exata de cada uma em ./voices/vozes.json ({"Nome": "transcrição"}).
 QWEN_TTS_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 VOICES_DIR = Path(__file__).parent / "voices"
+VOICES_FILE = VOICES_DIR / "vozes.json"
+VOICE_SAMPLE_RATE = 24000
+VOICE_SECONDS = (5, 30)  # duração aceita para a gravação de referência
+WHISPER_MODEL = "openai/whisper-large-v3-turbo"
 
 CONVERSATION_CONFIG = {
     "output_language": "Brazilian Portuguese",
     "conversation_style": ["envolvente", "didático", "descontraído"],
-    "roles_person1": "apresentador que resume o conteúdo",
-    "roles_person2": "convidado que faz perguntas e esclarece pontos",
+    # roles_person1/2 e as vozes são definidos em convert() com os nomes escolhidos.
     "user_instructions": (
         "Escreva todo o diálogo em português do Brasil, em linguagem falada e natural. "
         "Não use palavras em inglês, emojis nem marcações. Escreva números, placares e datas "
@@ -66,10 +72,7 @@ CONVERSATION_CONFIG = {
         "audio_format": "mp3",
         "ending_message": "Até a próxima!",
         "output_directories": {"audio": str(AUDIO_DIR)},
-        "qwen": {
-            "default_voices": {"question": "apresentador", "answer": "convidado"},
-            "model": QWEN_TTS_REPO,
-        },
+        "qwen": {"model": QWEN_TTS_REPO},
     },
 }
 
@@ -152,9 +155,8 @@ class QwenTTS(TTSProvider):
         wav = VOICES_DIR / f"{voice}.wav"
         key = (voice, wav.stat().st_mtime)
         if key not in QwenTTS._voice_prompts:
-            transcripts = json.loads((VOICES_DIR / "vozes.json").read_text(encoding="utf-8"))
             QwenTTS._voice_prompts[key] = self.tts.create_voice_clone_prompt(
-                ref_audio=str(wav), ref_text=transcripts[voice]
+                ref_audio=str(wav), ref_text=load_voices()[voice]
             )
         return QwenTTS._voice_prompts[key]
 
@@ -211,6 +213,19 @@ class ConversionError(Exception):
     """Erro esperado na conversão, com mensagem pronta para o usuário."""
 
 
+@dataclass
+class Source:
+    title: str
+    url: str
+    text: str
+
+
+@dataclass
+class Podcast:
+    audio: str
+    sources: List[Source]
+
+
 def build_config():
     # O podcastfy busca `<TTS>_API_KEY` no config; o Qwen3-TTS é local e não usa chave.
     config = load_config()  # também carrega o .env
@@ -243,16 +258,128 @@ def read_file(path: Path) -> str:
     return text
 
 
+def load_voices() -> dict:
+    """Vozes cadastradas ({nome: transcrição}) cuja gravação existe em ./voices."""
+    if not VOICES_FILE.is_file():
+        return {}
+    voices = json.loads(VOICES_FILE.read_text(encoding="utf-8"))
+    return {name: text for name, text in voices.items() if (VOICES_DIR / f"{name}.wav").is_file()}
+
+
+_whisper = None
+
+
+def transcribe(samples: np.ndarray) -> str:
+    """Transcreve áudio de 24 kHz com o Whisper, na CPU para não disputar a GPU com a voz."""
+    global _whisper
+    import librosa
+    from transformers import pipeline
+
+    if _whisper is None:
+        _whisper = pipeline("automatic-speech-recognition", model=WHISPER_MODEL, device="cpu")
+    audio16 = librosa.resample(samples, orig_sr=VOICE_SAMPLE_RATE, target_sr=16000)
+    result = _whisper({"raw": audio16, "sampling_rate": 16000}, generate_kwargs={"language": "portuguese"})
+    return result["text"].strip()
+
+
+def add_voice(name: str, audio_path: str, transcript: Optional[str] = None) -> str:
+    """Cadastra uma voz a partir de uma gravação e devolve a transcrição usada.
+
+    Sem `transcript`, a gravação é transcrita com o Whisper. A clonagem fica mais
+    fiel quando a transcrição bate exatamente com o que foi falado.
+    """
+    import librosa
+    import soundfile as sf
+
+    name = " ".join((name or "").split())
+    if not re.fullmatch(r"[\w\- ]{1,40}", name):
+        raise ConversionError("Use um nome de até 40 letras, números, espaços ou hífens.")
+    samples, _ = librosa.load(audio_path, sr=VOICE_SAMPLE_RATE, mono=True)
+    seconds = len(samples) / VOICE_SAMPLE_RATE
+    if not VOICE_SECONDS[0] <= seconds <= VOICE_SECONDS[1]:
+        raise ConversionError(
+            f"A gravação tem {seconds:.0f} s; use entre {VOICE_SECONDS[0]} e {VOICE_SECONDS[1]} s de fala."
+        )
+    transcript = (transcript or "").strip() or transcribe(samples)
+
+    VOICES_DIR.mkdir(exist_ok=True)
+    sf.write(VOICES_DIR / f"{name}.wav", samples, VOICE_SAMPLE_RATE)
+    voices = json.loads(VOICES_FILE.read_text(encoding="utf-8")) if VOICES_FILE.is_file() else {}
+    voices[name] = transcript
+    VOICES_FILE.write_text(json.dumps(voices, ensure_ascii=False, indent=2), encoding="utf-8")
+    return transcript
+
+
+def research(topic: str, max_pages: int = RESEARCH_PAGES) -> List[Source]:
+    """Pesquisa o tema no DuckDuckGo e lê as primeiras páginas que abrirem.
+
+    O texto de cada página é cortado para caber no limite de tokens por minuto
+    do plano gratuito da Groq.
+    """
+    from ddgs import DDGS
+
+    # O DuckDuckGo limita buscas seguidas e às vezes responde vazio, assim como
+    # os outros mecanismos que a ddgs consulta; tenta cada um até algum responder.
+    results, error = [], None
+    for backend in ("duckduckgo", "auto", "yahoo", "brave", "google", "bing", "startpage"):
+        try:
+            results = DDGS().text(topic, region="br-pt", max_results=max_pages * 2, backend=backend)
+            break
+        except Exception as e:
+            error = e
+    if not results:
+        raise ConversionError(f"A pesquisa na web falhou: {error}")
+
+    extractor = WebsiteExtractor()
+    sources: List[Source] = []
+    for result in results:
+        try:
+            text = extractor.extract_content(result["href"])
+        except Exception:
+            continue  # página fora do ar, bloqueada ou lenta: tenta a próxima
+        if len(text) < 300:
+            continue
+        sources.append(Source(result["title"], result["href"], text[:RESEARCH_PAGE_CHARS]))
+        if len(sources) == max_pages:
+            break
+    if not sources:
+        raise ConversionError(f"Nenhuma página encontrada sobre {topic!r}.")
+    return sources
+
+
 def prune_audios(keep: int = AUDIOS_TO_KEEP) -> None:
     audios = sorted(AUDIO_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)
     for old in audios[keep:]:
         old.unlink()
 
 
-def convert(inputs: List[str], llm_model: str = DEFAULT_LLM) -> str:
-    """Gera o podcast e devolve o caminho do MP3. O roteiro não é guardado."""
+def convert(
+    inputs: List[str],
+    llm_model: str = DEFAULT_LLM,
+    topic: Optional[str] = None,
+    host: Optional[str] = None,
+    guest: Optional[str] = None,
+) -> Podcast:
+    """Gera o podcast a partir de links, arquivos e/ou um tema pesquisado na web.
+
+    `host` e `guest` são vozes cadastradas (padrão: as duas primeiras). O roteiro
+    não é guardado; só os últimos AUDIOS_TO_KEEP MP3s ficam em data/audio.
+    """
+    voices = list(load_voices())
+    if len(voices) < 2:
+        raise ConversionError("Cadastre pelo menos duas vozes (apresentador e convidado).")
+    host = host or voices[0]
+    guest = guest or next(v for v in voices if v != host)
+    for voice in (host, guest):
+        if voice not in voices:
+            raise ConversionError(f"Voz {voice!r} não cadastrada. Disponíveis: {', '.join(voices)}.")
+    if host == guest:
+        raise ConversionError("Escolha vozes diferentes para o apresentador e o convidado.")
+
     urls: List[str] = []
     texts: List[str] = []
+    sources = research(topic) if topic else []
+    texts += [f"Fonte: {s.title} ({s.url})\n{s.text}" for s in sources]
     for item in inputs:
         path = Path(item)
         if path.is_file():
@@ -265,7 +392,11 @@ def convert(inputs: List[str], llm_model: str = DEFAULT_LLM) -> str:
 
     with tempfile.TemporaryDirectory() as transcripts_dir:
         conversation_config = deepcopy(CONVERSATION_CONFIG)
-        conversation_config["text_to_speech"]["output_directories"]["transcripts"] = transcripts_dir
+        conversation_config["roles_person1"] = f"{host}, apresentador que resume o conteúdo"
+        conversation_config["roles_person2"] = f"{guest}, convidado que faz perguntas e esclarece pontos"
+        tts_config = conversation_config["text_to_speech"]
+        tts_config["output_directories"]["transcripts"] = transcripts_dir
+        tts_config["qwen"]["default_voices"] = {"question": host, "answer": guest}
         audio = generate_podcast(
             urls=urls or None,
             text="\n\n".join(texts) or None,
@@ -279,18 +410,26 @@ def convert(inputs: List[str], llm_model: str = DEFAULT_LLM) -> str:
     if not audio:
         raise ConversionError("Falha ao gerar o podcast; veja o log no terminal.")
     prune_audios()
-    return audio
+    return Podcast(audio, sources)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Converte links e arquivos em podcast.")
-    parser.add_argument("inputs", nargs="+", help="URLs, vídeos do YouTube ou arquivos (PDF, DOCX, PPTX, TXT...)")
+    parser = argparse.ArgumentParser(description="Converte links, arquivos e temas em podcast.")
+    parser.add_argument("inputs", nargs="*", help="URLs, vídeos do YouTube ou arquivos (PDF, DOCX, PPTX, TXT...)")
+    parser.add_argument("--tema", help="tema a pesquisar na web (DuckDuckGo)")
     parser.add_argument("--llm", default=DEFAULT_LLM, help=f"modelo LiteLLM (padrão: {DEFAULT_LLM})")
+    parser.add_argument("--apresentador", help="voz do apresentador (padrão: a primeira cadastrada)")
+    parser.add_argument("--convidado", help="voz do convidado (padrão: a segunda cadastrada)")
     args = parser.parse_args()
+    if not args.inputs and not args.tema:
+        parser.error("informe links, arquivos ou --tema")
     try:
-        print(convert(args.inputs, args.llm))
+        podcast = convert(args.inputs, args.llm, args.tema, args.apresentador, args.convidado)
     except ConversionError as error:
         sys.exit(str(error))
+    for source in podcast.sources:
+        print(f"Fonte: {source.title} — {source.url}")
+    print(podcast.audio)
 
 
 if __name__ == "__main__":

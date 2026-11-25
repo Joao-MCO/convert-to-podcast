@@ -2,6 +2,7 @@ podcastfy==0.4.3
 qwen-tts==0.1.1
 markitdown[pdf,docx,pptx,xlsx]==0.1.9
 playwright
+ddgs==9.16.1
 # Mantêm o conjunto compatível com o podcastfy (numpy<2) e o gradio do qwen-tts (pillow<13).
 numpy<2
 librosa<1
